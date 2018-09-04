@@ -2,5 +2,13 @@
 name = "var-agg"
 version = "0.1.0"
 authors = ["Manuel Holtgrewe <manuel.holtgrewe@bihealth.de>"]
+license = "GPL-3.0+"
+readme = "README.md"
 
 [dependencies]
+clap = {version = "*", features = ["yaml", "color", "suggestions"]}
+error-chain = "*"
+rust-htslib = "*"
+slog = {version = "*", features = ["max_level_trace", "release_max_level_debug"] }
+slog-async = "*"
+slog-term = "*"

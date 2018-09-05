@@ -6,7 +6,9 @@ license = "GPL-3.0+"
 readme = "README.md"
 
 [dependencies]
+bio = "*"
 clap = {version = "*", features = ["yaml", "color", "suggestions"]}
+csv = "1"
 error-chain = "*"
 rust-htslib = "*"
 slog = {version = "*", features = ["max_level_trace", "release_max_level_debug"] }

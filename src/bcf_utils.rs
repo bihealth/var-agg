@@ -1,5 +1,4 @@
 /// Helper code for BCF/VCF files.
-
 use slog::Logger;
 
 use rust_htslib;

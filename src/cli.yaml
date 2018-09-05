@@ -47,3 +47,24 @@ args:
     multiple: true
     value_name: INPUT.<vcf|bcf>
     help: Path to VCF/BCF file(s) to read.
+- input_panel:
+    long: input-panel
+    takes_value: true
+    required: false
+    multiple: true
+    value_name: INPUT.panel
+    help: Path to panel file, format is "SAMPLE<tab>SUB-POPULATION<tab>POPULATION<ignored>"
+- input_ped:
+    long: input-ped
+    takes_value: true
+    required: false
+    multiple: true
+    value_name: INPUT.ped
+    help: Path to input PED file for FOUND_* INFO entries.
+- input_fasta:
+    long: input-fasta
+    takes_value: true
+    required: false
+    multiple: true
+    value_name: INPUT.fa
+    help: FAI-indexed reference FASTA file, only index will be accessed.

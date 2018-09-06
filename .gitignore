@@ -1,5 +1,7 @@
 /target
 **/*.rs.bk
 /*.bcf*
+/*.vcf*
 /run.sh
 *.sw?
+core.*

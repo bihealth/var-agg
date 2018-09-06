@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
+use std::mem;
 use std::result;
 use std::sync::atomic::Ordering;
 use std::sync::{atomic, Arc};
@@ -150,12 +151,15 @@ fn build_bcf_writer(
         header.push_record(line.as_bytes());
     }
 
-    // Replace contig lines
+    // Construct header with proper contigs, then merge
     if let Some(contigs) = contigs {
+        let mut contig_header = bcf::header::Header::new();
         for (ref name, length) in contigs.iter() {
-            header.remove_contig(name.as_bytes());
-            header.push_record(format!("##contig=<ID={},length={}>", name, length).as_bytes());
+            contig_header
+                .push_record(format!("##contig=<ID={},length={}>", name, length).as_bytes());
         }
+        unsafe { rust_htslib::htslib::bcf_hdr_merge(contig_header.inner, header.inner) };
+        mem::swap(&mut contig_header.inner, &mut header.inner);
     }
 
     let uncompressed = !path.ends_with(".bcf") && !path.ends_with(".vcf.gz");
@@ -163,6 +167,52 @@ fn build_bcf_writer(
 
     bcf::Writer::from_path(&path, &header, uncompressed, vcf)
         .chain_err(|| "Could not open BCF file for writing")
+}
+
+fn process_input(
+    logger: &slog::Logger,
+    path: &String,
+    pedigree: &Option<&Pedigree>,
+    pop_map: &Option<&HashMap<String, String>>,
+    populations: &Option<&Vec<String>>,
+    options: &Options,
+    writer: &mut bcf::Writer,
+) -> Result<()> {
+    info!(logger, "Processing {}", &path);
+
+    let mut reader = bcf::Reader::from_path(path)
+        .chain_err(|| format!("Could not open input file {} for reading", path))?;
+    if options.io_threads > 0 {
+        reader
+            .set_threads(options.io_threads as usize)
+            .chain_err(|| "Could not set number of threads")?;
+    }
+
+    let mut i: usize = 0;
+    loop {
+        let mut record = reader.empty_record();
+        match reader.read(&mut record) {
+            Ok(_) => record.unpack(),
+            Err(bcf::ReadError::NoMoreRecord) => break,
+            _ => bail!("Error reading BCF record"),
+        }
+
+        writer.translate(&mut record);
+        writer.subset(&mut record);
+        record
+            .push_info_integer(b"FOUNDER_AC", &[1])
+            .chain_err(|| "Could not push FOUNDER_AC")?;
+        writer
+            .write(&record)
+            .chain_err(|| "Problem writing record to output file")?;
+        i += 1;
+        if i % 100 == 0 {
+            debug!(logger, "Processed {} records -- at {}", i, record.pos());
+            return Ok(());
+        }
+    }
+
+    Ok(())
 }
 
 fn run(matches: ArgMatches) -> Result<()> {
@@ -274,10 +324,21 @@ fn run(matches: ArgMatches) -> Result<()> {
             &populations.as_ref(),
             &contigs.as_ref(),
             &reader,
-        )?;
+        )?
     };
 
     info!(logger, "Starting processing");
+    for path in &options.input {
+        process_input(
+            &logger,
+            path,
+            &pedigree.as_ref(),
+            &pop_map.as_ref(),
+            &populations.as_ref(),
+            &options,
+            &mut writer,
+        )?;
+    }
 
     bcf_utils::build_index(&logger, &options.output)?;
     info!(logger, "All done. Have a nice day!");

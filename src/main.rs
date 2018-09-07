@@ -4,6 +4,8 @@
 // TODO: get contigs from FAI file
 
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::env;
 use std::fs::File;
 use std::mem;
 use std::result;
@@ -13,14 +15,21 @@ use std::sync::{atomic, Arc};
 extern crate bio;
 use bio::io::fasta;
 
+#[macro_use]
+extern crate clap;
+use clap::{App, ArgMatches};
+
 extern crate csv;
 
 #[macro_use]
 extern crate error_chain;
 
-#[macro_use]
-extern crate clap;
-use clap::{App, ArgMatches};
+extern crate ordered_float;
+use ordered_float::OrderedFloat;
+
+extern crate rust_htslib;
+use rust_htslib::bcf::record::{Genotype, GenotypeAllele};
+use rust_htslib::bcf::{self, Read};
 
 #[macro_use]
 extern crate slog;
@@ -29,8 +38,7 @@ extern crate slog_term;
 
 use slog::Drain;
 
-extern crate rust_htslib;
-use rust_htslib::bcf::{self, Read};
+extern crate shlex;
 
 mod bcf_utils;
 mod options;
@@ -80,7 +88,6 @@ where
 /// Build bcf::Writer with appropriate header.
 fn build_bcf_writer(
     path: &String,
-    pedigree: &Option<&Pedigree>,
     populations: &Option<&Vec<String>>,
     contigs: &Option<&Vec<(String, i32)>>,
     reader: &bcf::Reader,
@@ -88,28 +95,29 @@ fn build_bcf_writer(
     let mut header = bcf::header::Header::from_template_subset(&reader.header(), &[])
         .chain_err(|| "Could not create header with subset of samples")?;
 
-    let mut lines = vec![
-        // Information over all individuals
-        "##INFO=<ID=AC_Hemi,Number=A,Type=Integer,Description=\"Hemizygous Count\">",
-        "##INFO=<ID=AC_Het,Number=A,Type=Integer,Description=\"Heterozygous Count\">",
-        "##INFO=<ID=AC_Hom,Number=A,Type=Integer,Description=\"Homozygous Count\">",
-    ];
+    header.push_record(
+        format!(
+            "##varaggCommand={}",
+            env::args()
+                .map(|s| shlex::quote(&s).to_string())
+                .collect::<Vec<String>>()
+                .join(" ")
+        ).as_bytes(),
+    );
 
-    if pedigree.is_some() {
-        lines.append(&mut vec![
-            // Information over founders only
-            "##INFO=<ID=FOUNDER_AC,Number=A,Type=Integer,Description=\"Alternate Allele Count \
-             (in founders only)\">",
-            "##INFO=<ID=FOUNDER_AN,Number=A,Type=Integer,Description=\"Total Allele Count \
-             (in founders only)\">",
-            "##INFO=<ID=FOUNDER_Hemi,Number=A,Type=Integer,Description=\"Hemizygous Count (in \
-             founders only)\">",
-            "##INFO=<ID=FOUNDER_Het,Number=A,Type=Integer,Description=\"Heterozygous Count (in \
-             founders only)\">",
-            "##INFO=<ID=FOUNDER_Hom,Number=A,Type=Integer,Description=\"Homozygous Count (in \
-             founders only)\">",
-        ]);
-    }
+    let lines = vec![
+        // The following line is only used to fix the bad 1000 genomes VCF files.
+        "##FORMAT=<ID=GL,Number=G,Type=Float,Description=\"Genotype Likelihoods\">",
+        // Information over founders (if PED is given) or all individuals (if not).
+        "##INFO=<ID=AC,Number=A,Type=Integer,Description=\"Alternate Allele Count\">",
+        "##INFO=<ID=AN,Number=1,Type=Integer,Description=\"Total Allele Count\">",
+        "##INFO=<ID=AF,Number=A,Type=Float,Description=\"Alternate Allele Frequency\">",
+        "##INFO=<ID=Hemi,Number=A,Type=Integer,Description=\"Hemizygous Count\">",
+        "##INFO=<ID=Het,Number=A,Type=Integer,Description=\"Heterozygous Count\">",
+        "##INFO=<ID=Hom,Number=A,Type=Integer,Description=\"Homozygous Count\">",
+        "##INFO=<ID=POPMAX,Number=1,Type=String,Description=\"Population with highest alternative
+         frequency (for multi-allelic sites, the sum of all allele frequencies is used)\">",
+    ];
 
     let mut more = Vec::new();
     if let Some(pops) = populations {
@@ -118,55 +126,169 @@ fn build_bcf_writer(
         for ref pop in pops_copy {
             more.push(format!(
                 "##INFO=<ID={}_AC,Number=A,Type=Integer,Description=\"Alternate Allele Count \
-                 (in founders only)\">",
-                pop
+                 (in population {})\">",
+                pop, pop
             ));
             more.push(format!(
-                "##INFO=<ID={}_AN,Number=A,Type=Integer,Description=\"Total Allele Count \
-                 (in founders only)\">",
-                pop
+                "##INFO=<ID={}_AN,Number=1,Type=Integer,Description=\"Total Allele Count \
+                 (in population {})\">",
+                pop, pop
             ));
             more.push(format!(
-                "##INFO=<ID={}_Hemi,Number=A,Type=Integer,Description=\"Hemizygous Count (in \
-                 founders only)\">",
-                pop
+                "##INFO=<ID={}_AF,Number=A,Type=Float,Description=\"Alternate allele frequency \
+                 (in population {})\">",
+                pop, pop
+            ));
+            more.push(format!(
+                "##INFO=<ID={}_Hemi,Number=A,Type=Integer,Description=\"Hemizygous Count (in
+                 population {})\">",
+                pop, pop
             ));
             more.push(format!(
                 "##INFO=<ID={}_Het,Number=A,Type=Integer,Description=\"Heterozygous Count (in \
-                 founders only)\">",
-                pop
+                 population {})\">",
+                pop, pop
             ));
             more.push(format!(
                 "##INFO=<ID={}_Hom,Number=A,Type=Integer,Description=\"Homozygous Count (in \
-                 founders only)\">",
-                pop
+                 population {})\">",
+                pop, pop
             ));
         }
     }
 
+    let mut out_header = bcf::header::Header::new();
     for line in lines {
-        header.push_record(line.as_bytes());
+        out_header.push_record(line.as_bytes());
     }
     for line in more {
-        header.push_record(line.as_bytes());
+        out_header.push_record(line.as_bytes());
     }
 
-    // Construct header with proper contigs, then merge
+    // Construct header with proper contigs.
     if let Some(contigs) = contigs {
-        let mut contig_header = bcf::header::Header::new();
         for (ref name, length) in contigs.iter() {
-            contig_header
-                .push_record(format!("##contig=<ID={},length={}>", name, length).as_bytes());
+            out_header.push_record(format!("##contig=<ID={},length={}>", name, length).as_bytes());
         }
-        unsafe { rust_htslib::htslib::bcf_hdr_merge(contig_header.inner, header.inner) };
-        mem::swap(&mut contig_header.inner, &mut header.inner);
     }
+
+    // Use trick for overriding contig and incorrect counts in output.
+    unsafe {
+        out_header.inner = rust_htslib::htslib::bcf_hdr_merge(out_header.inner, header.inner)
+    };
+    mem::swap(&mut out_header.inner, &mut header.inner);
 
     let uncompressed = !path.ends_with(".bcf") && !path.ends_with(".vcf.gz");
     let vcf = path.ends_with(".vcf") || path.ends_with(".vcf.gz");
 
     bcf::Writer::from_path(&path, &header, uncompressed, vcf)
         .chain_err(|| "Could not open BCF file for writing")
+}
+
+// TODO: this is insufficient as we need to do this per-alternative allele
+/// Statistics for one group (could be population, founder, all).
+#[derive(Debug)]
+struct GroupStats {
+    /// Name of the group
+    pub name: String,
+    /// Total observed heterozygous alleles
+    pub het: Vec<i32>,
+    /// Total observed homozygous alleles
+    pub hom: Vec<i32>,
+    /// Total observed hemizygous alleles
+    pub hemi: Vec<i32>,
+    /// Total allele count
+    pub an: i32,
+}
+
+impl GroupStats {
+    /// Create a new group only by name.
+    ///
+    /// ## Args
+    ///
+    /// - `usize` -- number of alternative alleles
+    pub fn new(name: &str, length: usize) -> Self {
+        return GroupStats {
+            name: name.to_string(),
+            het: vec![0; length],
+            hom: vec![0; length],
+            hemi: vec![0; length],
+            an: 0,
+        };
+    }
+
+    /// Return observed alternate allele count.
+    pub fn ac(&self) -> Vec<i32> {
+        (0..(self.het.len()))
+            .map(|i| self.het[i] + 2 * self.hom[i] + self.hemi[i])
+            .collect::<Vec<_>>()
+    }
+
+    /// Return allele frequencies.
+    pub fn af(&self) -> Vec<f32> {
+        self.ac()
+            .iter()
+            .map(|x| ((*x as f64) / (self.an as f64)) as f32)
+            .collect::<Vec<_>>()
+    }
+
+    /// Register a `Genotype`.
+    pub fn tally(&mut self, gt: &Genotype) -> () {
+        assert!(gt.len() >= 1 && gt.len() <= 2);
+        if gt.len() == 1 {
+            // One allele only, could only be hemizygous.
+            match gt[0] {
+                GenotypeAllele::Unphased(i) | GenotypeAllele::Phased(i) => {
+                    self.an += 1;
+                    let i = i as usize;
+                    if i > 0 {
+                        self.hemi[i - 1] += 1;
+                    }
+                }
+                _ => (),
+            }
+        } else {
+            // gt.len() == 2
+            // One allele only, could only be hemizygous.
+            match (gt[0], gt[1]) {
+                (GenotypeAllele::Unphased(i), GenotypeAllele::Unphased(j))
+                | (GenotypeAllele::Phased(i), GenotypeAllele::Unphased(j))
+                | (GenotypeAllele::Unphased(i), GenotypeAllele::Phased(j))
+                | (GenotypeAllele::Phased(i), GenotypeAllele::Phased(j)) => {
+                    // Case: both present
+                    self.an += 2;
+                    let i = i as usize;
+                    let j = j as usize;
+                    if i == 0 && j != 0 {
+                        self.het[j - 1] += 1;
+                    } else if i != 0 && j == 0 {
+                        self.het[i - 1] += 1;
+                    } else if i != 0 && j != 0 {
+                        if i == j {
+                            self.hom[i - 1] += 1;
+                        } else {
+                            self.het[i - 1] += 1;
+                            self.het[j - 1] += 1;
+                        }
+                    }
+                }
+                (_, GenotypeAllele::Unphased(i))
+                | (_, GenotypeAllele::Phased(i))
+                | (GenotypeAllele::Unphased(i), _)
+                | (GenotypeAllele::Phased(i), _) => {
+                    // Case: one missing, one present
+                    self.an += 1;
+                    let i = i as usize;
+                    if i != 0 {
+                        self.het[i - 1] += 1;
+                    }
+                }
+                _ => {
+                    // Case: both missing -- nop
+                }
+            }
+        }
+    }
 }
 
 fn process_input(
@@ -188,6 +310,29 @@ fn process_input(
             .chain_err(|| "Could not set number of threads")?;
     }
 
+    // If pedigree is given then only founders are considered per-population.
+    let considered_samples = if let Some(pedigree) = pedigree {
+        let reader_samples = reader
+            .header()
+            .samples()
+            .iter()
+            .map(|s| String::from_utf8(s.to_vec()).expect("Could not decode sample name as UTF-8"))
+            .collect::<HashSet<_>>();
+        pedigree
+            .individuals
+            .iter()
+            .filter(|i| i.father == "0" && i.mother == "0" && reader_samples.contains(&i.name))
+            .map(|i| i.name.clone())
+            .collect::<HashSet<_>>()
+    } else {
+        reader
+            .header()
+            .samples()
+            .iter()
+            .map(|s| String::from_utf8(s.to_vec()).expect("Could not decode sample name as UTF-8"))
+            .collect::<HashSet<_>>()
+    };
+
     let mut i: usize = 0;
     loop {
         let mut record = reader.empty_record();
@@ -197,18 +342,130 @@ fn process_input(
             _ => bail!("Error reading BCF record"),
         }
 
+        // Create overall counter.
+        let num_alleles = (record.allele_count() - 1) as usize;
+        let mut all_stats = GroupStats::new(&"ALL", num_alleles);
+
+        // Create counters for populations.
+        let mut pop_stats = pop_map.map(|_| {
+            // Initialize per-population counters.
+            let mut pop_stats: HashMap<String, GroupStats> = HashMap::new();
+            for pop in populations.unwrap() {
+                pop_stats.insert(pop.clone(), GroupStats::new(&pop.clone(), num_alleles));
+            }
+            pop_stats
+        });
+
+        // Count genotypes etc.
+        {
+            let gts = record
+                .genotypes()
+                .chain_err(|| "Could not get genotypes from record")?;
+            for sample in &considered_samples {
+                let sample_id = reader
+                    .header()
+                    .sample_to_id(sample.as_bytes())
+                    .chain_err(|| "Sample not found")?;
+                let gt = gts.get(*sample_id as usize);
+
+                all_stats.tally(&gt);
+                pop_stats.as_mut().map(|map| {
+                    let pop = pop_map
+                        .unwrap()
+                        .get(sample)
+                        .expect(&format!("Could not get population for sample {}", sample));
+                    map.get_mut(pop).map(|stats| stats.tally(&gt))
+                });
+            }
+        }
+
+        // Make record suitable for writing out.
         writer.translate(&mut record);
         writer.subset(&mut record);
+        trace!(logger, "{:?} {:?} {:?}", &all_stats, &all_stats.ac(), &all_stats.af());
+
+        // Store count and frequency information in the record.
         record
-            .push_info_integer(b"FOUNDER_AC", &[1])
-            .chain_err(|| "Could not push FOUNDER_AC")?;
+            .push_info_integer(b"AC", &all_stats.ac())
+            .chain_err(|| "Could not write INFO/AC")?;
+        record
+            .push_info_float(b"AF", &all_stats.af())
+            .chain_err(|| "Could not write INFO/AF")?;
+        record
+            .push_info_integer(b"AN", &[all_stats.an])
+            .chain_err(|| "Could not write INFO/AN")?;
+        record
+            .push_info_integer(b"Hemi", &all_stats.hemi)
+            .chain_err(|| "Could not write INFO/Hemi")?;
+        record
+            .push_info_integer(b"Het", &all_stats.het)
+            .chain_err(|| "Could not write INFO/Het")?;
+        record
+            .push_info_integer(b"Hom", &all_stats.hom)
+            .chain_err(|| "Could not write INFO/Hom")?;
+
+        if let Some(pops) = populations {
+            let tmp_map = pop_stats.as_ref().unwrap();
+            for pop in *pops {
+                let stats = tmp_map
+                    .get(pop)
+                    .expect(&format!("Could not find stats for population {}", &pop));
+                record
+                    .push_info_integer(format!("{}_AC", &pop).as_bytes(), &stats.ac())
+                    .chain_err(|| format!("Could not write INFO/{}_AC", &pop))?;
+                record
+                    .push_info_float(format!("{}_AF", &pop).as_bytes(), &stats.af())
+                    .chain_err(|| format!("Could not write INFO/{}_AF", &pop))?;
+                record
+                    .push_info_integer(format!("{}_AN", &pop).as_bytes(), &[stats.an])
+                    .chain_err(|| format!("Could not write INFO/{}_AN", &pop))?;
+                record
+                    .push_info_integer(format!("{}_Hemi", &pop).as_bytes(), &stats.hemi)
+                    .chain_err(|| format!("Could not write INFO/{}_Hemi", &pop))?;
+                record
+                    .push_info_integer(format!("{}_Het", &pop).as_bytes(), &stats.het)
+                    .chain_err(|| format!("Could not write INFO/{}_Het", &pop))?;
+                record
+                    .push_info_integer(format!("{}_Hom", &pop).as_bytes(), &stats.hom)
+                    .chain_err(|| format!("Could not write INFO/{}_Hom", &pop))?;
+            }
+            let popmax = pops
+                .iter()
+                .max_by_key(|p| OrderedFloat(tmp_map.get(*p).unwrap().af().iter().sum::<f32>()))
+                .expect("One must be largest");
+            let stats = tmp_map
+                .get(popmax)
+                .expect(&format!("Could not find stats for population {}", &popmax));
+            record
+                .push_info_string(b"POPMAX", &[popmax.as_bytes()])
+                .chain_err(|| "Could not write INFO/POPMAX_AC")?;
+            record
+                .push_info_integer(b"POPMAX_AC", &stats.ac())
+                .chain_err(|| "Could not write INFO/POPMAX_AC")?;
+            record
+                .push_info_float(b"POPMAX_AF", &stats.af())
+                .chain_err(|| "Could not write INFO/POPMAX_AF")?;
+            record
+                .push_info_integer(b"POPMAX_AN", &[stats.an])
+                .chain_err(|| "Could not write INFO/POPMAX_AN")?;
+            record
+                .push_info_integer(b"POPMAX_Hemi", &stats.hemi)
+                .chain_err(|| "Could not write INFO/POPMAX_Hemi")?;
+            record
+                .push_info_integer(b"POPMAX_Het", &stats.het)
+                .chain_err(|| "Could not write INFO/POPMAX_Het")?;
+            record
+                .push_info_integer(b"POPMAX_Hom", &stats.hom)
+                .chain_err(|| "Could not write INFO/POPMAX_Hom")?;
+        }
+
+        // Actually write out the record
         writer
             .write(&record)
             .chain_err(|| "Problem writing record to output file")?;
         i += 1;
-        if i % 100 == 0 {
+        if i % 1000 == 0 {
             debug!(logger, "Processed {} records -- at {}", i, record.pos());
-            return Ok(());
         }
     }
 
@@ -320,7 +577,6 @@ fn run(matches: ArgMatches) -> Result<()> {
         })?;
         build_bcf_writer(
             &options.output,
-            &pedigree.as_ref(),
             &populations.as_ref(),
             &contigs.as_ref(),
             &reader,

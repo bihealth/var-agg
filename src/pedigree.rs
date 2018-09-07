@@ -25,6 +25,7 @@ impl Sex {
     }
 
     /// Return integer representation for PED file.
+    #[allow(dead_code)]
     pub fn to_int(&self) -> i32 {
         match self {
             Sex::Male => 1,
@@ -53,6 +54,7 @@ impl DiseaseStatus {
     }
 
     /// Return integer representation for PED file.
+    #[allow(dead_code)]
     pub fn to_int(&self) -> i32 {
         match self {
             DiseaseStatus::Unaffected => 1,

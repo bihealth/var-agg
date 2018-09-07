@@ -342,6 +342,21 @@ fn process_input(
             _ => bail!("Error reading BCF record"),
         }
 
+        // Do not consider SVs.
+        if String::from_utf8(
+            record
+                .info(b"VT")
+                .string()
+                .unwrap_or_default()
+                .unwrap_or_default()
+                .pop()
+                .unwrap_or_default()
+                .to_vec(),
+        ).chain_err(|| "Could not decode string")? == "SV"
+        {
+            continue;
+        }
+
         // Create overall counter.
         let num_alleles = (record.allele_count() - 1) as usize;
         let mut all_stats = GroupStats::new(&"ALL", num_alleles);
@@ -382,7 +397,13 @@ fn process_input(
         // Make record suitable for writing out.
         writer.translate(&mut record);
         writer.subset(&mut record);
-        trace!(logger, "{:?} {:?} {:?}", &all_stats, &all_stats.ac(), &all_stats.af());
+        trace!(
+            logger,
+            "{:?} {:?} {:?}",
+            &all_stats,
+            &all_stats.ac(),
+            &all_stats.af()
+        );
 
         // Store count and frequency information in the record.
         record

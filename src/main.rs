@@ -589,32 +589,34 @@ fn run(matches: ArgMatches) -> Result<()> {
     )?;
 
     info!(logger, "Opening output BCF/VCF file");
-    let mut writer = {
-        let reader = bcf::Reader::from_path(&options.input[0]).chain_err(|| {
-            format!(
-                "Could not open input file {} for reading",
-                &options.input[0]
-            )
-        })?;
-        build_bcf_writer(
-            &options.output,
-            &populations.as_ref(),
-            &contigs.as_ref(),
-            &reader,
-        )?
-    };
+    {
+        let mut writer = {
+            let reader = bcf::Reader::from_path(&options.input[0]).chain_err(|| {
+                format!(
+                    "Could not open input file {} for reading",
+                    &options.input[0]
+                )
+            })?;
+            build_bcf_writer(
+                &options.output,
+                &populations.as_ref(),
+                &contigs.as_ref(),
+                &reader,
+            )?
+        };
 
-    info!(logger, "Starting processing");
-    for path in &options.input {
-        process_input(
-            &logger,
-            path,
-            &pedigree.as_ref(),
-            &pop_map.as_ref(),
-            &populations.as_ref(),
-            &options,
-            &mut writer,
-        )?;
+        info!(logger, "Starting processing");
+        for path in &options.input {
+            process_input(
+                &logger,
+                path,
+                &pedigree.as_ref(),
+                &pop_map.as_ref(),
+                &populations.as_ref(),
+                &options,
+                &mut writer,
+            )?;
+        }
     }
 
     bcf_utils::build_index(&logger, &options.output)?;

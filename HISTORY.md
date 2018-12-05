@@ -2,9 +2,9 @@
 var-agg Changelog
 =================
 
-----------------
-HEAD (unrelased)
-----------------
+------
+v0.1.1
+------
 
 - Using population `"Oth"` if cannot be found in map.
 

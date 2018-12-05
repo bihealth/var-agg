@@ -123,6 +123,7 @@ fn build_bcf_writer(
     if let Some(pops) = populations {
         let mut pops_copy: Vec<String> = (*pops).clone();
         pops_copy.insert(0, "POPMAX".to_string());
+        pops_copy.push("Oth".to_string());
         for ref pop in pops_copy {
             more.push(format!(
                 "##INFO=<ID={}_AC,Number=A,Type=Integer,Description=\"Alternate Allele Count \
@@ -385,10 +386,12 @@ fn process_input(
 
                 all_stats.tally(&gt);
                 pop_stats.as_mut().map(|map| {
+                    let pop_oth = "Oth".to_string();
                     let pop = pop_map
                         .unwrap()
                         .get(sample)
-                        .expect(&format!("Could not get population for sample {}", sample));
+                        .or(Some(&pop_oth))
+                        .unwrap();
                     map.get_mut(pop).map(|stats| stats.tally(&gt))
                 });
             }

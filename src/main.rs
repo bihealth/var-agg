@@ -229,7 +229,13 @@ impl GroupStats {
     pub fn af(&self) -> Vec<f32> {
         self.ac()
             .iter()
-            .map(|x| ((*x as f64) / (self.an as f64)) as f32)
+            .map(|x| {
+                (if self.an != 0 {
+                    (*x as f64) / (self.an as f64)
+                } else {
+                    0f64
+                }) as f32
+            })
             .collect::<Vec<_>>()
     }
 
@@ -387,11 +393,7 @@ fn process_input(
                 all_stats.tally(&gt);
                 pop_stats.as_mut().map(|map| {
                     let pop_oth = "Oth".to_string();
-                    let pop = pop_map
-                        .unwrap()
-                        .get(sample)
-                        .or(Some(&pop_oth))
-                        .unwrap();
+                    let pop = pop_map.unwrap().get(sample).or(Some(&pop_oth)).unwrap();
                     map.get_mut(pop).map(|stats| stats.tally(&gt))
                 });
             }

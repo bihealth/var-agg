@@ -2,6 +2,12 @@
 var-agg Changelog
 =================
 
+-----------------
+HEAD (unreleased)
+-----------------
+
+- Fixing division by zero problem with computation of AF.
+
 ------
 v0.1.1
 ------

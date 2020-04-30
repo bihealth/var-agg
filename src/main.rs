@@ -48,7 +48,7 @@ use pedigree::Pedigree;
 
 mod errors {
     // Create the Error, ErrorKind, ResultExt, and Result types
-    error_chain!{}
+    error_chain! {}
 }
 
 pub use errors::*;
@@ -102,7 +102,8 @@ fn build_bcf_writer(
                 .map(|s| shlex::quote(&s).to_string())
                 .collect::<Vec<String>>()
                 .join(" ")
-        ).as_bytes(),
+        )
+        .as_bytes(),
     );
 
     let lines = vec![
@@ -123,6 +124,7 @@ fn build_bcf_writer(
     if let Some(pops) = populations {
         let mut pops_copy: Vec<String> = (*pops).clone();
         pops_copy.insert(0, "POPMAX".to_string());
+        pops_copy.insert(0, "ALL".to_string());
         pops_copy.push("Oth".to_string());
         for ref pop in pops_copy {
             more.push(format!(
@@ -318,26 +320,28 @@ fn process_input(
     }
 
     // If pedigree is given then only founders are considered per-population.
-    let considered_samples = if let Some(pedigree) = pedigree {
+    let (all_samples, founder_samples) = if let Some(pedigree) = pedigree {
         let reader_samples = reader
             .header()
             .samples()
             .iter()
             .map(|s| String::from_utf8(s.to_vec()).expect("Could not decode sample name as UTF-8"))
             .collect::<HashSet<_>>();
-        pedigree
+        let founders = pedigree
             .individuals
             .iter()
             .filter(|i| i.father == "0" && i.mother == "0" && reader_samples.contains(&i.name))
             .map(|i| i.name.clone())
-            .collect::<HashSet<_>>()
+            .collect::<HashSet<_>>();
+        (reader_samples, founders)
     } else {
-        reader
+        let samples = reader
             .header()
             .samples()
             .iter()
             .map(|s| String::from_utf8(s.to_vec()).expect("Could not decode sample name as UTF-8"))
-            .collect::<HashSet<_>>()
+            .collect::<HashSet<_>>();
+        (samples.clone(), samples.clone())
     };
 
     let mut i: usize = 0;
@@ -359,7 +363,9 @@ fn process_input(
                 .pop()
                 .unwrap_or_default()
                 .to_vec(),
-        ).chain_err(|| "Could not decode string")? == "SV"
+        )
+        .chain_err(|| "Could not decode string")?
+            == "SV"
         {
             continue;
         }
@@ -367,6 +373,7 @@ fn process_input(
         // Create overall counter.
         let num_alleles = (record.allele_count() - 1) as usize;
         let mut all_stats = GroupStats::new(&"ALL", num_alleles);
+        let mut founder_stats = GroupStats::new(&"FOUNDERS", num_alleles);
 
         // Create counters for populations.
         let mut pop_stats = pop_map.map(|_| {
@@ -383,14 +390,21 @@ fn process_input(
             let gts = record
                 .genotypes()
                 .chain_err(|| "Could not get genotypes from record")?;
-            for sample in &considered_samples {
+            for sample in &all_samples {
+                let sample_id = reader
+                    .header()
+                    .sample_to_id(sample.as_bytes())
+                    .chain_err(|| "Sample not found")?;
+                all_stats.tally(&gts.get(*sample_id as usize));
+            }
+            for sample in &founder_samples {
                 let sample_id = reader
                     .header()
                     .sample_to_id(sample.as_bytes())
                     .chain_err(|| "Sample not found")?;
                 let gt = gts.get(*sample_id as usize);
 
-                all_stats.tally(&gt);
+                founder_stats.tally(&gt);
                 pop_stats.as_mut().map(|map| {
                     let pop_oth = "Oth".to_string();
                     let pop = pop_map.unwrap().get(sample).or(Some(&pop_oth)).unwrap();
@@ -405,29 +419,48 @@ fn process_input(
         trace!(
             logger,
             "{:?} {:?} {:?}",
-            &all_stats,
-            &all_stats.ac(),
-            &all_stats.af()
+            &founder_stats,
+            &founder_stats.ac(),
+            &founder_stats.af()
         );
 
         // Store count and frequency information in the record.
         record
-            .push_info_integer(b"AC", &all_stats.ac())
+            .push_info_integer(b"ALL_AC", &all_stats.ac())
+            .chain_err(|| "Could not write INFO/ALL_AC")?;
+        record
+            .push_info_float(b"ALL_AF", &all_stats.af())
+            .chain_err(|| "Could not write INFO/ALL_AF")?;
+        record
+            .push_info_integer(b"ALL_AN", &[all_stats.an])
+            .chain_err(|| "Could not write INFO/ALL_AN")?;
+        record
+            .push_info_integer(b"ALL_Hemi", &all_stats.hemi)
+            .chain_err(|| "Could not write INFO/ALL_Hemi")?;
+        record
+            .push_info_integer(b"ALL_Het", &all_stats.het)
+            .chain_err(|| "Could not write INFO/ALL_Het")?;
+        record
+            .push_info_integer(b"ALL_Hom", &all_stats.hom)
+            .chain_err(|| "Could not write INFO/ALL_Hom")?;
+
+        record
+            .push_info_integer(b"AC", &founder_stats.ac())
             .chain_err(|| "Could not write INFO/AC")?;
         record
-            .push_info_float(b"AF", &all_stats.af())
+            .push_info_float(b"AF", &founder_stats.af())
             .chain_err(|| "Could not write INFO/AF")?;
         record
-            .push_info_integer(b"AN", &[all_stats.an])
+            .push_info_integer(b"AN", &[founder_stats.an])
             .chain_err(|| "Could not write INFO/AN")?;
         record
-            .push_info_integer(b"Hemi", &all_stats.hemi)
+            .push_info_integer(b"Hemi", &founder_stats.hemi)
             .chain_err(|| "Could not write INFO/Hemi")?;
         record
-            .push_info_integer(b"Het", &all_stats.het)
+            .push_info_integer(b"Het", &founder_stats.het)
             .chain_err(|| "Could not write INFO/Het")?;
         record
-            .push_info_integer(b"Hom", &all_stats.hom)
+            .push_info_integer(b"Hom", &founder_stats.hom)
             .chain_err(|| "Could not write INFO/Hom")?;
 
         if let Some(pops) = populations {
@@ -508,7 +541,8 @@ fn run(matches: ArgMatches) -> Result<()> {
     let drain = RuntimeLevelFilter {
         drain: drain,
         log_level: log_level.clone(),
-    }.fuse();
+    }
+    .fuse();
     let drain = slog_async::Async::new(drain).build().fuse();
 
     let logger = slog::Logger::root(drain, o!());

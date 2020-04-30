@@ -98,7 +98,8 @@ impl Pedigree {
     /// Load `Pedigree` from path to PED file.
     pub fn from_path(path: &str) -> Result<Pedigree> {
         // Create CSV reader and check columns.
-        let file = File::open(&path).chain_err(|| format!("Could not open input file: {}", &path))?;
+        let file =
+            File::open(&path).chain_err(|| format!("Could not open input file: {}", &path))?;
         let mut reader = csv::ReaderBuilder::new()
             .flexible(true)
             .delimiter(b'\t')
@@ -107,7 +108,8 @@ impl Pedigree {
         if reader
             .headers()
             .chain_err(|| "Could not access PED headers")?
-            .len() < 6
+            .len()
+            < 6
         {
             bail!("PED file has less than 6 columns!");
         }
